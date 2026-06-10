@@ -1,0 +1,12 @@
+.env
+
+# build
+solscan-watcher
+
+# db
+watcher*
+
+.venv
+
+# Logs
+logs/**
