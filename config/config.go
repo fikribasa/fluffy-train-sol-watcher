@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	SolscanCookie  string
-	PollInterval   time.Duration
-	SolThreshold   float64
-	DBPath         string
-	TelegramToken  string
-	TelegramChatID string
-	TelegramThreadId string
-	ErrorCooldown  time.Duration
+	FlareSolverrURL     string
+	FlareSolverrTimeout int
+	PollInterval        time.Duration
+	SolThreshold        float64
+	DBPath              string
+	TelegramToken       string
+	TelegramChatID      string
+	TelegramThreadId    string
+	ErrorCooldown       time.Duration
 }
 
 func Load() (*Config, error) {
@@ -26,7 +27,14 @@ func Load() (*Config, error) {
 
 	cfg := &Config{}
 
-	cfg.SolscanCookie = mustEnv("SOLSCAN_COOKIE")
+	cfg.FlareSolverrURL = envOrDefault("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1")
+
+	timeoutStr := envOrDefault("FLARESOLVERR_TIMEOUT", "60000")
+	timeout, err := strconv.Atoi(timeoutStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid FLARESOLVERR_TIMEOUT %q: %w", timeoutStr, err)
+	}
+	cfg.FlareSolverrTimeout = timeout
 
 	pollStr := envOrDefault("POLL_INTERVAL", "2m")
 	d, err := time.ParseDuration(pollStr)

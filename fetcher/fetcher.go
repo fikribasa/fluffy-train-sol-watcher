@@ -1,19 +1,12 @@
 package fetcher
 
 import (
-	"context"
-	"crypto/tls"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"os"
-	"strings"
 	"time"
-
-	"golang.org/x/net/http2"
-	utls "github.com/refraction-networking/utls"
 )
 
 const solscanURL = "https://api-v2.solscan.io/v2/program/transaction" +
@@ -24,7 +17,34 @@ const solscanURL = "https://api-v2.solscan.io/v2/program/transaction" +
 	"&hide_spam=true" +
 	"&hide_failed=true"
 
-// Response mirrors the Solscan API response structure.
+// FlareSolverr request/response structs
+
+type fsRequest struct {
+	CMD            string `json:"cmd"`
+	URL            string `json:"url"`
+	MaxTimeout     int    `json:"maxTimeout"`
+}
+
+type fsResponse struct {
+	Status   string     `json:"status"`
+	Message  string     `json:"message"`
+	Solution fsSolution `json:"solution"`
+}
+
+type fsSolution struct {
+	URL        string      `json:"url"`
+	Status     int         `json:"status"`
+	Response   string      `json:"response"` // raw body from target URL
+	Cookies    []fsCookie  `json:"cookies"`
+}
+
+type fsCookie struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Solscan response structs
+
 type Response struct {
 	Success bool `json:"success"`
 	Data    struct {
@@ -35,15 +55,15 @@ type Response struct {
 }
 
 type Transaction struct {
-	BlockTime         int64    `json:"blockTime"`
-	Slot              int64    `json:"slot"`
-	TxHash            string   `json:"txHash"`
-	Fee               int64    `json:"fee"`
-	Status            string   `json:"status"`
-	Signer            []string `json:"signer"`
-	Tags              []string `json:"tags"`
-	SolValueRaw       string   `json:"sol_value"`
-	Tokens            []string `json:"tokens"`
+	BlockTime   int64    `json:"blockTime"`
+	Slot        int64    `json:"slot"`
+	TxHash      string   `json:"txHash"`
+	Fee         int64    `json:"fee"`
+	Status      string   `json:"status"`
+	Signer      []string `json:"signer"`
+	Tags        []string `json:"tags"`
+	SolValueRaw string   `json:"sol_value"`
+	Tokens      []string `json:"tokens"`
 	ParsedInstruction []struct {
 		Type string `json:"type"`
 	} `json:"parsedInstruction"`
@@ -60,117 +80,63 @@ type TokenMeta struct {
 	PriceUSDT    float64 `json:"price_usdt"`
 }
 
-// FetcherI is the common interface for fetching transactions.
-// Both Fetcher (solscan cookie) and RPCFetcher (Solana RPC) implement it.
-type FetcherI interface {
-	Fetch() (*Response, error)
-}
-
-// Fetcher queries the Solscan API with a cf_clearance cookie.
-// Optionally reloads the cookie from a cache file on every call.
 type Fetcher struct {
-	client     *http.Client
-	cookie     string
-	cookieFile string
+	client          *http.Client
+	flareSolverrURL string
+	timeout         int // milliseconds passed to FlareSolverr
 }
 
-// New creates a Fetcher with a static cookie string.
-func New(cookie string) *Fetcher {
+func New(flareSolverrURL string, timeoutMS int) *Fetcher {
+	// HTTP client timeout is slightly longer than FlareSolverr's own timeout
+	httpTimeout := time.Duration(timeoutMS+10000) * time.Millisecond
 	return &Fetcher{
-		client: &http.Client{
-			Timeout:   15 * time.Second,
-			Transport: newUTLSTransport(),
-		},
-		cookie: cookie,
+		client:          &http.Client{Timeout: httpTimeout},
+		flareSolverrURL: flareSolverrURL,
+		timeout:         timeoutMS,
 	}
 }
 
-// NewWithCookieCache creates a Fetcher that reloads the cookie from cacheFile
-// on every Fetch() call. The initial cookie is used as fallback.
-func NewWithCookieCache(cookie, cacheFile string) *Fetcher {
-	f := New(cookie)
-	f.cookieFile = cacheFile
-	return f
-}
-
-// loadCookie reloads the cookie from the cache file if configured.
-func (f *Fetcher) loadCookie() {
-	if f.cookieFile == "" {
-		return
-	}
-	data, err := os.ReadFile(f.cookieFile)
-	if err != nil {
-		return
-	}
-	c := strings.TrimSpace(string(data))
-	if c != "" && c != f.cookie {
-		f.cookie = c
-	}
-}
-
-// newUTLSTransport returns an http2.RoundTripper that mimics Chrome's TLS
-// fingerprint (defeating Cloudflare) and speaks HTTP/2.
-func newUTLSTransport() http.RoundTripper {
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	return &http2.Transport{
-		AllowHTTP: false,
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			tlsConn := utls.UClient(conn, &utls.Config{
-				ServerName: strings.Split(addr, ":")[0],
-				NextProtos: []string{"h2", "http/1.1"},
-			}, utls.HelloChrome_Auto)
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				conn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
-		},
-	}
-}
-
-// Fetch queries the Solscan API. If cookieFile is set, reloads the cookie
-// from the cache file before each request.
 func (f *Fetcher) Fetch() (*Response, error) {
-	f.loadCookie()
-
-	req, err := http.NewRequest(http.MethodGet, solscanURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+	// Build FlareSolverr request
+	fsReq := fsRequest{
+		CMD:        "request.get",
+		URL:        solscanURL,
+		MaxTimeout: f.timeout,
 	}
 
-	req.Header.Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
-	req.Header.Set("accept", "application/json, text/plain, */*")
-	req.Header.Set("accept-language", "en-AU,en;q=0.8")
-	req.Header.Set("dnt", "1")
-	req.Header.Set("origin", "https://solscan.io")
-	req.Header.Set("referer", "https://solscan.io/")
-	req.Header.Set("sec-ch-ua", `"Brave";v="149", "Chromium";v="149", "Not)A;Brand";v="24"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
-	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("sec-fetch-site", "same-site")
-	req.Header.Set("sec-gpc", "1")
-	req.Header.Set("Cookie", f.cookie)
-
-	resp, err := f.client.Do(req)
+	body, err := json.Marshal(fsReq)
 	if err != nil {
-		return nil, fmt.Errorf("http get: %w", err)
+		return nil, fmt.Errorf("marshal flaresolverr request: %w", err)
+	}
+
+	resp, err := f.client.Post(f.flareSolverrURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("post to flaresolverr: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, body)
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read flaresolverr response: %w", err)
 	}
 
+	var fsResp fsResponse
+	if err := json.Unmarshal(rawBody, &fsResp); err != nil {
+		return nil, fmt.Errorf("decode flaresolverr response: %w", err)
+	}
+
+	if fsResp.Status != "ok" {
+		return nil, fmt.Errorf("flaresolverr status %q: %s", fsResp.Status, fsResp.Message)
+	}
+
+	if fsResp.Solution.Status != http.StatusOK {
+		return nil, fmt.Errorf("solscan returned HTTP %d via flaresolverr", fsResp.Solution.Status)
+	}
+
+	// solution.response is the raw Solscan JSON body as a string
 	var result Response
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	if err := json.Unmarshal([]byte(fsResp.Solution.Response), &result); err != nil {
+		return nil, fmt.Errorf("decode solscan response: %w", err)
 	}
 
 	if !result.Success {
