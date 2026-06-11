@@ -34,7 +34,7 @@ func main() {
 	}
 	defer database.Close()
 
-	fetch := fetcher.New(cfg.FlareSolverrURL, cfg.FlareSolverrTimeout)
+	fetch := fetcher.NewWithFlareSolverr(cfg.SolscanCookie, cfg.FlareSolverrURL)
 	notify := notifier.New(cfg.TelegramToken, cfg.TelegramChatID, cfg.TelegramThreadId, cfg.ErrorCooldown)
 
 	slog.Info("solscan-watcher started",

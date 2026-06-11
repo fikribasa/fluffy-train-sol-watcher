@@ -12,6 +12,7 @@ import (
 type Config struct {
 	FlareSolverrURL     string
 	FlareSolverrTimeout int
+	SolscanCookie       string
 	PollInterval        time.Duration
 	SolThreshold        float64
 	DBPath              string
@@ -28,6 +29,9 @@ func Load() (*Config, error) {
 	cfg := &Config{}
 
 	cfg.FlareSolverrURL = envOrDefault("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1")
+
+	// Optional: seed cookie. If empty, the fetcher self-refreshes via FlareSolverr.
+	cfg.SolscanCookie = os.Getenv("SOLSCAN_COOKIE")
 
 	timeoutStr := envOrDefault("FLARESOLVERR_TIMEOUT", "60000")
 	timeout, err := strconv.Atoi(timeoutStr)
